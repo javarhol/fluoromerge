@@ -1,0 +1,38 @@
+# Generic widefield epifluorescence profile: DAPI / FITC / TRITC.
+#
+# To add a microscope (or a specific objective on a microscope), copy this file,
+# rename it, and adjust the values. Every .toml file in this folder — or in the
+# "profiles" folder next to the FluoroMerge executable — shows up in the app's
+# profile dropdown. A useful pattern is one profile per scope + objective,
+# e.g. "BX51 10x", "BX51 20x", each with its own pixel_size_um.
+
+name = "Generic DAPI/FITC/TRITC"
+
+# Fallback µm-per-pixel used for scale bars when the image metadata has no
+# PhysicalSizeX. Measure once with a stage micrometer. Leave commented out to
+# rely on metadata only (scale bars are skipped when neither is available).
+# pixel_size_um = 0.645
+
+[contrast]
+# Percentiles used for the display window (like ImageJ's Auto B&C, but shared
+# across the whole batch in "fixed" mode so brightness stays comparable).
+black_percentile = 0.5
+white_percentile = 99.9
+
+# Channels are matched by the OME EmissionWavelength embedded in each TIFF.
+# When files carry no metadata, the app falls back to filename order using the
+# order the channels are listed here (first file = first channel, etc.).
+[[channels]]
+name = "DAPI"
+emission_range = [400, 490]   # nm
+color = [0, 0, 255]           # displayed as blue
+
+[[channels]]
+name = "FITC"
+emission_range = [495, 570]
+color = [0, 255, 0]           # green
+
+[[channels]]
+name = "TRITC"
+emission_range = [575, 660]
+color = [255, 0, 0]           # red

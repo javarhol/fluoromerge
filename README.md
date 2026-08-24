@@ -1,0 +1,86 @@
+# FluoroMerge
+
+Merge single-channel fluorescence microscopy TIFFs (e.g. DAPI / FITC / TRITC)
+into color composite images, with automatic scale bars. Built for the common
+workflow where the microscope saves each channel as its own TIFF and the files
+just need to be combined — no ImageJ knowledge required.
+
+## Using the app (undergrads start here)
+
+1. Download the build for your computer (Windows / Linux / macOS) from the
+   **Releases** page and unzip it.
+2. Open **FluoroMerge**.
+3. Pick your microscope profile from the dropdown.
+4. Drag your image folder onto the window (or use *Choose folder…*).
+5. Done — composites appear in a `composites` folder next to your images,
+   along with a `merge_summary.txt` listing exactly which files were merged
+   and anything that was skipped.
+
+You can also drop just the 3 channel images of a single field of view.
+
+### How it decides which file is which channel
+
+Each TIFF's embedded OME metadata records the emission wavelength it was
+captured with, so files are matched to channels **by metadata, not filename
+order** — sets captured in an unusual order still merge correctly. If a file
+has no metadata, the app falls back to filename order (DAPI, FITC, TRITC by
+default) and says so in the log.
+
+Incomplete sets (e.g. a DAPI image with no matching FITC/TRITC) are **never
+guessed at** — they are skipped and reported in the summary so you can
+re-image or investigate.
+
+### Contrast modes
+
+- **Consistent across batch** (default): one brightness window per channel for
+  the whole run, so signal intensity is visually comparable between images —
+  use this when comparing conditions.
+- **Auto per image**: each image is stretched independently — prettier for
+  standalone figures, but intensities are not comparable between images.
+
+### Scale bars
+
+The bar length is read from the pixel size embedded in each image's metadata
+(`PhysicalSizeX`). If your files don't carry one, add `pixel_size_um` to your
+microscope profile (measure once with a stage micrometer for each objective).
+
+## Microscope profiles
+
+Profiles are plain-text `.toml` files in the `profiles` folder next to the app
+(or in `~/.fluoromerge/profiles`). Each defines the channel names, the
+emission-wavelength ranges used to recognize them, their display colors, and
+an optional fallback pixel size. Copy `generic_dapi_fitc_tritc.toml` and edit
+it to add a new scope; one profile per scope + objective works well
+(e.g. `bx51_10x.toml`, `bx51_20x.toml`).
+
+## Running from source / command line
+
+```bash
+pip install .
+fluoromerge                       # launches the GUI
+fluoromerge /path/to/images       # headless batch merge
+fluoromerge img1.tif img2.tif img3.tif --contrast auto --format png
+```
+
+## Building the executables
+
+Builds are automated with GitHub Actions (`.github/workflows/build.yml`):
+push a tag like `v0.1.0` (or run the workflow manually from the Actions tab)
+and download the Windows/Linux/macOS artifacts. To build locally instead:
+
+```bash
+pip install . pyinstaller
+pyinstaller --windowed --name FluoroMerge --collect-all tkinterdnd2 \
+    --add-data "profiles:profiles" run_app.py     # use ";" on Windows
+```
+
+## Development
+
+```bash
+python tests/make_fixtures.py         # generate synthetic OME-TIFF test data
+python -m fluoromerge tests/fixtures  # end-to-end run on the fixtures
+```
+
+The fixtures replicate real-world quirks: out-of-order channel sets,
+duplicated channels from abandoned shots, trailing orphans, and files with no
+metadata.

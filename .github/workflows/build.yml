@@ -1,0 +1,42 @@
+name: Build executables
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: FluoroMerge-windows
+            sep: ";"
+          - os: ubuntu-latest
+            artifact: FluoroMerge-linux
+            sep: ":"
+          - os: macos-latest
+            artifact: FluoroMerge-macos
+            sep: ":"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+      - name: Install dependencies
+        run: pip install . pyinstaller
+      - name: Build
+        run: >
+          pyinstaller --noconfirm --windowed --name FluoroMerge
+          --collect-all tkinterdnd2
+          --add-data "profiles${{ matrix.sep }}profiles"
+          run_app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
