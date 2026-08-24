@@ -1,0 +1,34 @@
+# Optika microscope with a color camera.
+#
+# This scope saves each fluorescence channel as a full-color RGB photo with no
+# embedded metadata. FluoroMerge recognizes the channel from the dominant color
+# of the bright pixels (red / green / blue emission), and skips images whose
+# content is multicolor — those are usually overlays the microscope software
+# already merged.
+
+name = "Optika 40x"
+
+# Stage-micrometer calibration for the 40x objective: 11.75 px/µm.
+pixel_size_um = 0.0851
+
+[contrast]
+black_percentile = 0.5
+white_percentile = 99.9
+
+# emission_range only applies when files carry wavelength metadata (these
+# don't), but keep sensible values in case exports ever change. The listed
+# order is also the filename-order fallback: DAPI, then 488, then 555.
+[[channels]]
+name = "DAPI"
+emission_range = [400, 490]
+color = [0, 0, 255]
+
+[[channels]]
+name = "488"
+emission_range = [495, 570]
+color = [0, 255, 0]
+
+[[channels]]
+name = "555"
+emission_range = [575, 660]
+color = [255, 0, 0]

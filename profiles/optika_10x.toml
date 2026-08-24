@@ -6,12 +6,10 @@
 # content is multicolor — those are usually overlays the microscope software
 # already merged.
 
-name = "Optika (color camera)"
+name = "Optika 10x"
 
-# No pixel size is embedded in these files. To get scale bars, measure a stage
-# micrometer once per objective and set the µm-per-pixel value here (one copy
-# of this profile per objective works well):
-# pixel_size_um = 0.17
+# Stage-micrometer calibration for the 10x objective: 2.87 px/µm.
+pixel_size_um = 0.3484
 
 [contrast]
 black_percentile = 0.5
