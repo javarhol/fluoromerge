@@ -121,22 +121,27 @@ def read_ome_fields(path: Path) -> tuple[float | None, float | None]:
         except Exception:
             return None, None
 
+    def unit_of(attr: str) -> str:
+        m = re.search(attr + r'="([^"]+)"', desc)
+        # Real exports sometimes store µ with a mangled encoding ("Âµm");
+        # strip stray  bytes so the unit still compares equal to "µm".
+        return m.group(1).replace("Â", "").strip() if m else ""
+
     em = None
     m = re.search(r'EmissionWavelength="([\d.]+)"', desc)
     if m:
         em = float(m.group(1))
-        unit = re.search(r'EmissionWavelengthUnit="([^"]+)"', desc)
-        if unit and unit.group(1) in ("µm", "um"):
+        if unit_of("EmissionWavelengthUnit") in ("µm", "um"):
             em *= 1000.0
 
     px = None
     m = re.search(r'PhysicalSizeX="([\d.eE+-]+)"', desc)
     if m:
         px = float(m.group(1))
-        unit = re.search(r'PhysicalSizeXUnit="([^"]+)"', desc)
-        if unit and unit.group(1) == "nm":
+        unit = unit_of("PhysicalSizeXUnit")
+        if unit == "nm":
             px /= 1000.0
-        elif unit and unit.group(1) == "mm":
+        elif unit == "mm":
             px *= 1000.0
     return em, px
 
