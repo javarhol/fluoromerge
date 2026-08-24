@@ -22,9 +22,14 @@ You can also drop just the 3 channel images of a single field of view.
 
 Each TIFF's embedded OME metadata records the emission wavelength it was
 captured with, so files are matched to channels **by metadata, not filename
-order** — sets captured in an unusual order still merge correctly. If a file
-has no metadata, the app falls back to filename order (DAPI, FITC, TRITC by
-default) and says so in the log.
+order** — sets captured in an unusual order still merge correctly.
+
+Color-camera microscopes (e.g. Optika) that save each channel as an RGB photo
+with no metadata are also supported: the channel is recognized from the
+dominant color of the bright pixels, and multicolor images (overlays the
+microscope software already merged) are detected and skipped. Grayscale files
+with no metadata fall back to filename order (DAPI, FITC, TRITC by default);
+the log reports whenever a fallback was used.
 
 Incomplete sets (e.g. a DAPI image with no matching FITC/TRITC) are **never
 guessed at** — they are skipped and reported in the summary so you can

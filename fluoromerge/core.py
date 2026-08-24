@@ -50,6 +50,19 @@ class Profile:
                 return c.name
         return None
 
+    def classify_hue(self, hue_deg: float) -> str:
+        """Nearest channel by circular distance between a capture's dominant hue
+        and the channel's display-color hue (for color-camera captures)."""
+        import colorsys
+
+        def dist(c: ChannelDef) -> float:
+            r, g, b = (v / 255.0 for v in c.color)
+            channel_hue = colorsys.rgb_to_hsv(r, g, b)[0] * 360.0
+            d = abs(hue_deg - channel_hue) % 360.0
+            return min(d, 360.0 - d)
+
+        return min(self.channels, key=dist).name
+
     def color_of(self, channel: str) -> tuple[int, int, int]:
         for c in self.channels:
             if c.name == channel:
@@ -104,8 +117,11 @@ class SourceImage:
     index: int           # trailing numeric index (files without one get -1)
     emission_nm: float | None
     pixel_size_um: float | None
+    is_color: bool = False           # RGB capture from a color camera
+    hue: float | None = None         # dominant hue of bright pixels (color captures)
+    hue_concentration: float = 0.0   # 0..1; low = multicolor (already merged?)
     channel: str | None = None       # assigned during classification
-    channel_source: str = "unknown"  # "metadata" | "filename-order"
+    channel_source: str = "unknown"  # "metadata" | "filename-order" | "color"
 
 
 def read_ome_fields(path: Path) -> tuple[float | None, float | None]:
@@ -146,11 +162,42 @@ def read_ome_fields(path: Path) -> tuple[float | None, float | None]:
     return em, px
 
 
+MIN_HUE_CONCENTRATION = 0.85  # below this a color capture looks multicolor
+
+
+def color_capture_hue(path: Path) -> tuple[float, float]:
+    """Dominant hue of the brightest pixels of an RGB capture, plus its circular
+    concentration (1.0 = a single pure hue, low values = a multicolor image,
+    e.g. an overlay that was already merged by the microscope software)."""
+    with Image.open(path) as im:
+        a = np.asarray(im.convert("RGB"), dtype=np.float64)[::4, ::4]
+    intensity = a.max(axis=2)
+    bright = a[intensity >= np.percentile(intensity, 98)]
+    chroma = bright / (bright.sum(axis=1, keepdims=True) + 1e-9)
+    r, g, b = chroma[:, 0], chroma[:, 1], chroma[:, 2]
+    hue = np.arctan2(np.sqrt(3) * (g - b), 2 * r - g - b)
+    sin_m, cos_m = np.sin(hue).mean(), np.cos(hue).mean()
+    concentration = float(np.hypot(sin_m, cos_m))
+    mean_hue = float(np.degrees(np.arctan2(sin_m, cos_m)) % 360)
+    return mean_hue, concentration
+
+
 def scan_file(path: Path) -> SourceImage:
-    m = re.match(r"(.+?)[_-](\d+)$", path.stem)
-    prefix, index = (m.group(1), int(m.group(2))) if m else (path.stem, -1)
+    if path.stem.isdigit():
+        # Purely numeric names (0001.tif, 0002.tif, ...) are one sequence;
+        # use the folder name as the set prefix.
+        prefix, index = path.parent.name, int(path.stem)
+    else:
+        m = re.match(r"(.+?)[_-](\d+)$", path.stem)
+        prefix, index = (m.group(1), int(m.group(2))) if m else (path.stem, -1)
     em, px = read_ome_fields(path)
-    return SourceImage(path=path, prefix=prefix, index=index, emission_nm=em, pixel_size_um=px)
+    with Image.open(path) as im:
+        is_color = im.mode not in ("I;16", "I;16B", "I;16L", "I", "L", "F", "1")
+    img = SourceImage(path=path, prefix=prefix, index=index,
+                      emission_nm=em, pixel_size_um=px, is_color=is_color)
+    if is_color and em is None:
+        img.hue, img.hue_concentration = color_capture_hue(path)
+    return img
 
 
 # --------------------------------------------------------------------------- #
@@ -203,7 +250,18 @@ def classify_images(images: list[SourceImage], profile: Profile, result: ScanRes
                 f"channel in profile '{profile.name}'"
             )
 
-    no_meta = [i for i in images if i.emission_nm is None]
+    color_captures = [i for i in images if i.emission_nm is None and i.is_color]
+    for img in color_captures:
+        if img.hue_concentration < MIN_HUE_CONCENTRATION:
+            result.warnings.append(
+                f"{img.path.name}: multicolor content (hue concentration "
+                f"{img.hue_concentration:.2f}) — looks already merged; skipped"
+            )
+            continue
+        img.channel = profile.classify_hue(img.hue)
+        img.channel_source = "color"
+
+    no_meta = [i for i in images if i.emission_nm is None and not i.is_color]
     if no_meta:
         # Fall back to filename order: within each prefix, assign channels
         # cyclically in the profile's channel order (DAPI, FITC, TRITC, ...).
@@ -257,8 +315,14 @@ def group_sets(images: list[SourceImage], profile: Profile) -> ScanResult:
 # --------------------------------------------------------------------------- #
 
 def _load_array(path: Path) -> np.ndarray:
+    """Channel intensity as a 2D array. Color-camera captures (RGB photos of a
+    single fluorescence channel) reduce to the max across R/G/B, which keeps
+    full signal for any emission color including yellow-green."""
     with Image.open(path) as im:
-        return np.array(im, dtype=np.float64)
+        arr = np.array(im, dtype=np.float64)
+    if arr.ndim == 3:
+        arr = arr[:, :, :3].max(axis=2)
+    return arr
 
 
 def compute_fixed_windows(sets: list[MergeSet], profile: Profile) -> dict[str, tuple[float, float]]:

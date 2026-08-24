@@ -85,6 +85,30 @@ def main() -> None:
     for i, (em, seed) in enumerate([(455, 7), (518, 7), (615, 7)], start=1):
         save(out / f"test_sample_c_{i:02d}.tif", em, seed, with_meta=False)
 
+    # color-camera folder: RGB captures with purely numeric names, one channel
+    # per photo tinted in its emission color, plus an already-merged overlay
+    # that the classifier must reject
+    color_dir = out / "color_camera"
+    color_dir.mkdir(exist_ok=True)
+    tints = {455: (0.25, 0.45, 1.0), 518: (0.75, 1.0, 0.15), 615: (1.0, 0.12, 0.1)}
+    layers = {}
+    for i, em in enumerate([615, 455, 518], start=1):   # deliberately out of order
+        mono = field(em, 8).astype(np.float64)
+        mono = 255 * mono / mono.max()
+        rgb = (mono[:, :, None] * np.array(tints[em])[None, None, :]).clip(0, 255)
+        layers[em] = rgb
+        Image.fromarray(rgb.astype(np.uint8)).save(color_dir / f"{i:04d}.tif")
+    # the overlay needs comparable numbers of bright pixels in every hue, like
+    # a real merged image, so build it from three equal blob fields
+    overlay = np.zeros((H, W, 3))
+    for tint, seed in [((0.25, 0.45, 1.0), 20), ((0.75, 1.0, 0.15), 21), ((1.0, 0.12, 0.1), 22)]:
+        mono = blobs(60, 8, 255, seed)
+        mono = 255 * mono / mono.max()
+        overlay += mono[:, :, None] * np.array(tint)[None, None, :]
+    Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8)).save(
+        color_dir / "overlay_already_merged.tif"
+    )
+
     print(f"fixtures written to {out}")
 
 
