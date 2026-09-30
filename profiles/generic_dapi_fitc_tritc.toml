@@ -22,6 +22,9 @@ white_percentile = 99.9
 # Channels are matched by the OME EmissionWavelength embedded in each TIFF.
 # When files carry no metadata, the app falls back to filename order using the
 # order the channels are listed here (first file = first channel, etc.).
+# Filenames ending in a channel word ("..._dapi.tif", "..._fitc.tif") are
+# recognized by the channel name or common dye names; add your own words with
+# e.g.  aliases = ["green", "ch2"]
 [[channels]]
 name = "DAPI"
 emission_range = [400, 490]   # nm

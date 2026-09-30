@@ -1,11 +1,13 @@
 """Generate synthetic OME-TIFF fixtures that replicate the structures seen in
 real microscope exports: complete triplets, an out-of-order set, a duplicated
-channel (abandoned first shot), a trailing orphan, and files with no metadata.
+channel (abandoned first shot), a trailing orphan, files with no metadata,
+color-camera captures, and files named by channel word ("..._s1-2_tritc").
 
 Usage: python tests/make_fixtures.py [output_dir]
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -108,6 +110,28 @@ def main() -> None:
     Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8)).save(
         color_dir / "overlay_already_merged.tif"
     )
+
+    # channel-named folder: the channel is a word at the end of the filename
+    # (hand-typed at the scope), with the inconsistencies seen in real data.
+    # File times stand in for capture times; the last three names disagree
+    # and must be grouped by capture time.
+    named_dir = out / "channel_named"
+    named_dir.mkdir(exist_ok=True)
+    t0 = 1_780_000_000
+    named = [
+        ("slide_s1-1_dapi", 455, 9, 0), ("slide_s1-2_tritc", 615, 9, 40),
+        ("slide_s1-3_fitc", 518, 9, 80),
+        ("slide_s1-1-par_dapi", 455, 10, 300), ("slide_s1-2-par_tritc", 615, 10, 340),
+        ("slide_s1-3-par_fitc", 518, 10, 380),
+        ("slide_s2_1_dapi", 455, 11, 900), ("slide_s2_2_tritc", 615, 11, 940),
+        ("slide_s2_3_fitc", 518, 11, 980),
+        ("slide_s2-1-1_dapi", 455, 12, 1500), ("slide_s2-1-2-2_tritc", 615, 12, 1540),
+        ("slide_s2--1-3-3_fitc", 518, 12, 1580),
+    ]
+    for stem, em, seed, dt in named:
+        path = named_dir / f"{stem}.tif"
+        save(path, em, seed, with_meta=False)
+        os.utime(path, (t0 + dt, t0 + dt))
 
     print(f"fixtures written to {out}")
 

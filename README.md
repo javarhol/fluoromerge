@@ -31,6 +31,17 @@ microscope software already merged) are detected and skipped. Grayscale files
 with no metadata fall back to filename order (DAPI, FITC, TRITC by default);
 the log reports whenever a fallback was used.
 
+Files named with a channel word at the end — `..._s1-1_dapi.tif`,
+`..._s1-2_tritc.tif`, `..._s1-3_fitc.tif` — are recognized from that word
+(DAPI, Hoechst, FITC, GFP, TRITC, mCherry, … or the profile's channel names)
+and grouped by the rest of the name, ignoring the shot number and `-`/`_`
+differences. When hand-typed names disagree (a typo, a retake renamed
+`s4-1-2-2`), files captured back-to-back — one per channel, nothing else in
+between, within 10 minutes, same sample — are still merged, and the summary
+flags each such set as *grouped by capture time* so you can double-check it.
+Capture time comes from the file's modified date, so copy folders in a way
+that keeps it (Finder and Explorer do).
+
 Incomplete sets (e.g. a DAPI image with no matching FITC/TRITC) are **never
 guessed at** — they are skipped and reported in the summary so you can
 re-image or investigate.
@@ -87,5 +98,6 @@ python -m fluoromerge tests/fixtures  # end-to-end run on the fixtures
 ```
 
 The fixtures replicate real-world quirks: out-of-order channel sets,
-duplicated channels from abandoned shots, trailing orphans, and files with no
-metadata.
+duplicated channels from abandoned shots, trailing orphans, files with no
+metadata, color-camera captures, and inconsistently hand-typed channel-named
+files (`tests/fixtures/channel_named`).

@@ -2,8 +2,11 @@
 
 Channel identity is read from OME-XML metadata (EmissionWavelength) embedded in
 TIFF tag 270 whenever possible; a filename-order fallback from the active
-microscope profile covers files without usable metadata. Pixel size for scale
-bars comes from OME PhysicalSizeX, with a per-profile fallback.
+microscope profile covers files without usable metadata. Files named with a
+channel word (e.g. "..._s1-2_tritc.tif") are recognized from that word and
+grouped by the rest of the name, with capture time used to rescue sets whose
+names were typed inconsistently. Pixel size for scale bars comes from OME
+PhysicalSizeX, with a per-profile fallback.
 """
 from __future__ import annotations
 
@@ -18,6 +21,19 @@ from PIL import Image, ImageDraw, ImageFont
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 IMAGEDESCRIPTION_TAG = 270
 
+# Filename words that name a fluorescence channel, mapped to a nominal emission
+# peak (nm) so they resolve against any profile's emission ranges.
+DYE_EMISSION_NM = {
+    "dapi": 461, "hoechst": 461, "bfp": 450,
+    "fitc": 519, "gfp": 510, "egfp": 510, "af488": 519, "alexa488": 519,
+    "tritc": 576, "af555": 580, "alexa555": 580, "af568": 603, "alexa568": 603,
+    "rfp": 600, "mcherry": 610, "texasred": 615,
+}
+
+# Longest time span (seconds) of files that are grouped into a set by capture
+# time alone, when their names don't agree.
+RESCUE_MAX_SPAN_S = 10 * 60
+
 
 # --------------------------------------------------------------------------- #
 # Profiles
@@ -28,6 +44,7 @@ class ChannelDef:
     name: str
     emission_range: tuple[float, float]
     color: tuple[int, int, int]
+    aliases: tuple[str, ...] = ()   # extra filename words naming this channel
 
 
 @dataclass
@@ -63,6 +80,17 @@ class Profile:
 
         return min(self.channels, key=dist).name
 
+    def classify_name(self, word: str) -> str | None:
+        """Channel named by a filename word: a profile channel name or alias,
+        else a common dye/fluorophore name mapped through its emission peak."""
+        w = word.lower()
+        for c in self.channels:
+            if w == c.name.lower() or w in (a.lower() for a in c.aliases):
+                return c.name
+        if w in DYE_EMISSION_NM:
+            return self.classify_wavelength(DYE_EMISSION_NM[w])
+        return None
+
     def color_of(self, channel: str) -> tuple[int, int, int]:
         for c in self.channels:
             if c.name == channel:
@@ -80,6 +108,7 @@ def load_profile(path: Path) -> Profile:
             name=ch["name"],
             emission_range=(float(ch["emission_range"][0]), float(ch["emission_range"][1])),
             color=tuple(int(v) for v in ch["color"]),
+            aliases=tuple(str(a) for a in ch.get("aliases", [])),
         )
         for ch in data["channels"]
     ]
@@ -121,7 +150,10 @@ class SourceImage:
     hue: float | None = None         # dominant hue of bright pixels (color captures)
     hue_concentration: float = 0.0   # 0..1; low = multicolor (already merged?)
     channel: str | None = None       # assigned during classification
-    channel_source: str = "unknown"  # "metadata" | "filename-order" | "color"
+    channel_source: str = "unknown"  # "metadata" | "filename" | "color" | "filename-order"
+    mtime: float = 0.0               # file modification time (≈ capture time)
+    name_base: str | None = None     # stem minus a trailing word, e.g. "..._s1-2"
+    name_word: str | None = None     # that trailing word, e.g. "tritc"
 
 
 def read_ome_fields(path: Path) -> tuple[float | None, float | None]:
@@ -190,14 +222,33 @@ def scan_file(path: Path) -> SourceImage:
     else:
         m = re.match(r"(.+?)[_-](\d+)$", path.stem)
         prefix, index = (m.group(1), int(m.group(2))) if m else (path.stem, -1)
+    # A trailing non-numeric word may name the channel ("..._s1-2_tritc");
+    # whether it does is decided against the profile during classification.
+    wm = re.match(r"(.+?)[_-]+([A-Za-z][A-Za-z0-9]*)$", path.stem)
     em, px = read_ome_fields(path)
     with Image.open(path) as im:
         is_color = im.mode not in ("I;16", "I;16B", "I;16L", "I", "L", "F", "1")
     img = SourceImage(path=path, prefix=prefix, index=index,
-                      emission_nm=em, pixel_size_um=px, is_color=is_color)
-    if is_color and em is None:
+                      emission_nm=em, pixel_size_um=px, is_color=is_color,
+                      mtime=path.stat().st_mtime,
+                      name_base=wm.group(1) if wm else None,
+                      name_word=wm.group(2) if wm else None)
+    if is_color and em is None and img.name_word is None:
         img.hue, img.hue_concentration = color_capture_hue(path)
     return img
+
+
+def name_set_key(base: str) -> str:
+    """Set key for a channel-named file: separators normalized and the last
+    purely numeric token (the per-channel shot number) dropped, so
+    "s1-1_dapi", "s1-2_tritc", "s1_3_fitc" all key to "s1", and
+    "s1-1-par_dapi", "s1-2-par_tritc" key to "s1_par"."""
+    tokens = [t for t in re.split(r"[-_]+", base) if t]
+    for i in range(len(tokens) - 1, 0, -1):
+        if tokens[i].isdigit():
+            del tokens[i]
+            break
+    return "_".join(tokens)
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +260,7 @@ class MergeSet:
     prefix: str
     number: int                       # 1-based within prefix
     members: dict[str, SourceImage]   # channel name -> image
+    note: str = ""                    # e.g. how the set was assembled
 
     @property
     def pixel_size_um(self) -> float | None:
@@ -250,8 +302,31 @@ def classify_images(images: list[SourceImage], profile: Profile, result: ScanRes
                 f"channel in profile '{profile.name}'"
             )
 
-    color_captures = [i for i in images if i.emission_nm is None and i.is_color]
+    for img in images:
+        if img.emission_nm is not None or not img.name_word:
+            continue
+        channel = profile.classify_name(img.name_word)
+        if channel is None:
+            continue
+        img.channel = channel
+        img.channel_source = "filename"
+        img.prefix, img.index = name_set_key(img.name_base), -1
+        if img.is_color:
+            # Cross-check the name against the photo's color; don't override it.
+            img.hue, img.hue_concentration = color_capture_hue(img.path)
+            if img.hue_concentration >= MIN_HUE_CONCENTRATION:
+                by_color = profile.classify_hue(img.hue)
+                if by_color != channel:
+                    result.warnings.append(
+                        f"{img.path.name}: named {channel} but its color looks like "
+                        f"{by_color}; using the filename"
+                    )
+
+    color_captures = [i for i in images if i.emission_nm is None and i.is_color
+                      and i.channel_source != "filename"]
     for img in color_captures:
+        if img.hue is None:   # skipped in scan_file: its name ended in a word
+            img.hue, img.hue_concentration = color_capture_hue(img.path)
         if img.hue_concentration < MIN_HUE_CONCENTRATION:
             result.warnings.append(
                 f"{img.path.name}: multicolor content (hue concentration "
@@ -261,7 +336,8 @@ def classify_images(images: list[SourceImage], profile: Profile, result: ScanRes
         img.channel = profile.classify_hue(img.hue)
         img.channel_source = "color"
 
-    no_meta = [i for i in images if i.emission_nm is None and not i.is_color]
+    no_meta = [i for i in images if i.emission_nm is None and not i.is_color
+               and i.channel_source != "filename"]
     if no_meta:
         # Fall back to filename order: within each prefix, assign channels
         # cyclically in the profile's channel order (DAPI, FITC, TRITC, ...).
@@ -281,12 +357,13 @@ def classify_images(images: list[SourceImage], profile: Profile, result: ScanRes
 
 
 def group_sets(images: list[SourceImage], profile: Profile) -> ScanResult:
-    """Walk each prefix in numeric order, completing a set once every profile
-    channel is present. A repeated channel orphans the older capture (e.g. an
-    abandoned first DAPI shot); leftovers at the end are orphans too."""
+    """Walk each prefix in shot order (numeric index, then capture time),
+    completing a set once every profile channel is present. A repeated channel
+    orphans the older capture (e.g. an abandoned first DAPI shot); leftovers at
+    the end are orphans too. Channel-named leftovers are then given a second
+    chance by capture time (see rescue_by_time)."""
     result = ScanResult()
     classify_images(images, profile, result)
-
     wanted = set(profile.channel_names)
     by_prefix: dict[str, list[SourceImage]] = {}
     for img in images:
@@ -297,17 +374,78 @@ def group_sets(images: list[SourceImage], profile: Profile) -> ScanResult:
 
     for prefix in sorted(by_prefix):
         pending: dict[str, SourceImage] = {}
-        count = 0
-        for img in sorted(by_prefix[prefix], key=lambda i: i.index):
+        for img in sorted(by_prefix[prefix], key=lambda i: (i.index, i.mtime, i.path.name)):
             if img.channel in pending:
                 result.orphans.append(pending.pop(img.channel))
             pending[img.channel] = img
             if set(pending) == wanted:
-                count += 1
-                result.sets.append(MergeSet(prefix=prefix, number=count, members=pending))
+                result.sets.append(MergeSet(prefix=prefix, number=0, members=pending))
                 pending = {}
         result.orphans.extend(pending.values())
+
+    rescue_by_time(images, profile, result)
+
+    # Number sets within each prefix in shot order.
+    def order(s: MergeSet) -> tuple:
+        m = s.members.values()
+        return (s.prefix, min(i.index for i in m), min(i.mtime for i in m))
+    result.sets.sort(key=order)
+    counts: dict[str, int] = {}
+    for s in result.sets:
+        counts[s.prefix] = counts.get(s.prefix, 0) + 1
+        s.number = counts[s.prefix]
     return result
+
+
+def _shared_sample(keys: list[str]) -> bool:
+    """True when set keys agree on everything but (at most) their last token
+    of the shortest key, e.g. "s38_s4_1" / "s38_s4_1_2" (a retake with a
+    mistyped number) but not "s38_s4" / "s39_s1"."""
+    split = [k.split("_") for k in keys]
+    need = min(len(t) for t in split) - 1
+    return need >= 1 and all(t[:need] == split[0][:need] for t in split)
+
+
+def rescue_by_time(images: list[SourceImage], profile: Profile, result: ScanResult) -> None:
+    """Channel-named orphans whose names disagree (typos, "s1_1" vs "s1-1",
+    retakes renamed by hand) are still one set when they were captured
+    back-to-back: one file per channel, consecutive in capture order within
+    their folder with nothing else in between, within RESCUE_MAX_SPAN_S, and
+    from the same sample. Every such set is reported so it can be checked."""
+    wanted = set(profile.channel_names)
+    k = len(wanted)
+    leftover = {id(o) for o in result.orphans
+                if o.channel in wanted and o.channel_source == "filename"}
+    if len(leftover) < k:
+        return
+
+    rescued: set[int] = set()
+    folders: dict[Path, list[SourceImage]] = {}
+    for img in images:
+        folders.setdefault(img.path.parent, []).append(img)
+    for files in folders.values():
+        timeline = sorted(files, key=lambda i: (i.mtime, i.path.name))
+        i = 0
+        while i + k <= len(timeline):
+            run = timeline[i:i + k]
+            if (all(id(r) in leftover for r in run)
+                    and {r.channel for r in run} == wanted
+                    and run[-1].mtime - run[0].mtime <= RESCUE_MAX_SPAN_S
+                    and _shared_sample([r.prefix for r in run])):
+                members = {r.channel: r for r in run}
+                names = ", ".join(r.path.name for r in run)
+                result.sets.append(MergeSet(
+                    prefix=run[0].prefix, number=0, members=members,
+                    note="grouped by capture time",
+                ))
+                result.warnings.append(
+                    f"names disagree, grouped by capture time — please check: {names}"
+                )
+                rescued.update(id(r) for r in run)
+                i += k
+            else:
+                i += 1
+    result.orphans = [o for o in result.orphans if id(o) not in rescued]
 
 
 # --------------------------------------------------------------------------- #
@@ -495,7 +633,8 @@ def run_merge(
         sources = "  ".join(
             f"{ch}:{img.path.name}" for ch, img in sorted(s.members.items())
         )
-        manifest.append(f"{out_name}  <-  {sources}")
+        note = f"   [{s.note}]" if s.note else ""
+        manifest.append(f"{out_name}  <-  {sources}{note}")
         log(f"✓ {out_name}")
 
     summary = out_dir / "merge_summary.txt"
