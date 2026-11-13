@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from .core import (
-    LUTS, Adjustment, lut_name, Profile, RunOptions, ScanResult, SourceImage, _load_array,
+    IMAGE_MATCH_NOTE, LUTS, Adjustment, lut_name, Profile, RunOptions, ScanResult, SourceImage, _load_array,
     append_merge_log, collect_tiffs, composite, default_output_dir,
     describe_members, group_sets, image_stats, load_profiles, manual_stem,
     run_merge, save_composite, scan_file, unique_path,
@@ -246,7 +246,10 @@ class Tile(tk.Frame):
         if item.channel and item.img.channel_source == "filename-order" \
                 and not item.channel_override:
             channel += " ?"      # guessed from file order
-        parts = [channel, item.img.objective or self.app.profile_objective()]
+        px = item.img.pixel_size_um
+        scale = item.img.objective or self.app.profile_objective() or (
+            f"{px:.3g} µm/px" if px else None)
+        parts = [channel, scale]
         self.title.configure(text="  ·  ".join(p for p in parts if p))
         self.subtitle.configure(text=item.path.name)
 
@@ -269,7 +272,10 @@ class Card(tk.Frame):
         head.pack(fill="x", pady=(0, 4))
         tk.Label(head, text=title, bg=PANEL, fg=FG, font=app.font_bold).pack(side="left")
         if note:
-            tk.Label(head, text=f"  {note}", bg=PANEL, fg="#e0b050",
+            # green: the images themselves show one field; amber: worth a check
+            confident = note.startswith(IMAGE_MATCH_NOTE) and "· no" not in note
+            tk.Label(head, text=f"  {note}", bg=PANEL,
+                     fg="#7cc47c" if confident else "#e0b050",
                      font=app.font_small).pack(side="left")
         pick = tk.Label(head, text="select all", bg=PANEL, fg=ACCENT,
                         font=app.font_small, cursor="hand2")
@@ -992,7 +998,8 @@ class App:
                         images.append(scan_file(f))
                     except Exception as exc:
                         self.events.put(("log", f"⚠ Can't read {f.name}: {exc}"))
-                result = group_sets(images, profile)
+                result = group_sets(images, profile,
+                                    progress=lambda m: self.events.put(("status", m)))
                 loaded = {}
                 for n, img in enumerate(images, 1):
                     if img.path in cache:
@@ -1039,7 +1046,7 @@ class App:
         for w in result.warnings:
             self.log(f"⚠ {w}")
         n_sets = len(result.sets)
-        self.set_status(f"{len(self.items)} image(s) · {n_sets} complete set(s) detected"
+        self.set_status(f"{len(self.items)} image(s) · {n_sets} set(s) detected"
                         f" · {len(result.orphans)} not in a set")
         self.busy = False
 
@@ -1118,7 +1125,8 @@ class App:
         for s in self.result.sets:
             members = sorted((by_path[img.path] for img in s.members.values()),
                              key=lambda i: order.get(i.img.channel, 99))
-            self.cards.append(Card(inner, self, f"{s.prefix}  ·  set {s.number}",
+            self.cards.append(Card(inner, self,
+                                   f"{s.prefix.rstrip('_- ')}  ·  set {s.number}",
                                    s.note, members, wrap=False))
         in_sets = {img.path for s in self.result.sets for img in s.members.values()}
         rest = [i for i in self.items if i.path not in in_sets]

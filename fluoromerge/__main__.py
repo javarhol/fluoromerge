@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contrast", choices=["fixed", "auto"], default="fixed")
     parser.add_argument("--format", choices=["tif", "png"], default="tif")
     parser.add_argument("--no-scale-bar", action="store_true")
+    parser.add_argument("--no-image-match", action="store_true",
+                        help="Group by file name / shot order only, without "
+                             "comparing what the images show")
     args = parser.parse_args(argv)
 
     if not args.inputs:
@@ -52,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         contrast=args.contrast,
         scale_bar=not args.no_scale_bar,
         output_format=args.format,
+        match_images=not args.no_image_match,
     )
     result = run_merge(args.inputs, profile, options)
     return 0 if result.sets else 2

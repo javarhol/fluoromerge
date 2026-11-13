@@ -384,14 +384,35 @@ def classify_images(images: list[SourceImage], profile: Profile, result: ScanRes
             )
 
 
-def group_sets(images: list[SourceImage], profile: Profile) -> ScanResult:
+def group_sets(images: list[SourceImage], profile: Profile, match_images: bool = True,
+               progress=None) -> ScanResult:
+    """Group channel images into sets: by file name and shot order (see
+    group_by_name), then checked against what the images show (see
+    reconcile_with_images) unless match_images is False."""
+    result = ScanResult()
+    classify_images(images, profile, result)
+    group_by_name(images, profile, result)
+    if match_images:
+        reconcile_with_images(images, profile, result, progress)
+
+    # Number sets within each prefix in shot order.
+    def order(s: MergeSet) -> tuple:
+        m = s.members.values()
+        return (s.prefix, min(i.index for i in m), min(i.mtime for i in m))
+    result.sets.sort(key=order)
+    counts: dict[str, int] = {}
+    for s in result.sets:
+        counts[s.prefix] = counts.get(s.prefix, 0) + 1
+        s.number = counts[s.prefix]
+    return result
+
+
+def group_by_name(images: list[SourceImage], profile: Profile, result: ScanResult) -> None:
     """Walk each prefix in shot order (numeric index, then capture time),
     completing a set once every profile channel is present. A repeated channel
     orphans the older capture (e.g. an abandoned first DAPI shot); leftovers at
     the end are orphans too. Channel-named leftovers are then given a second
     chance by capture time (see rescue_by_time)."""
-    result = ScanResult()
-    classify_images(images, profile, result)
     wanted = set(profile.channel_names)
     by_prefix: dict[str, list[SourceImage]] = {}
     for img in images:
@@ -413,16 +434,66 @@ def group_sets(images: list[SourceImage], profile: Profile) -> ScanResult:
 
     rescue_by_time(images, profile, result)
 
-    # Number sets within each prefix in shot order.
-    def order(s: MergeSet) -> tuple:
-        m = s.members.values()
-        return (s.prefix, min(i.index for i in m), min(i.mtime for i in m))
-    result.sets.sort(key=order)
-    counts: dict[str, int] = {}
+
+IMAGE_MATCH_NOTE = "matched by image"
+
+
+def reconcile_with_images(images: list[SourceImage], profile: Profile,
+                          result: ScanResult, progress=None) -> None:
+    """Let what the images show overrule file-name / shot-order grouping.
+
+    Images showing the same field (fieldmatch.match_fields) are positive
+    evidence. A name-based set is kept when it doesn't split any such group
+    — this also lets it add a channel whose structure doesn't resemble the
+    others (e.g. sparse puncta) to a matched group. Otherwise the image
+    groups win and the name-based set is dropped with a warning. Image groups
+    may be missing a channel (e.g. only DAPI + FITC were taken of a field);
+    they become sets of what is there."""
+    from .fieldmatch import match_fields
+
+    wanted = set(profile.channel_names)
+    candidates = [i for i in images if i.channel in wanted]
+    try:
+        groups, _ = match_fields(candidates, _load_array, progress)
+    except Exception as exc:  # never let matching break the name-based result
+        result.warnings.append(f"image matching skipped: {exc}")
+        return
+    if not groups:
+        return
+    group_of = {id(img): frozenset(id(x) for x in g) for g in groups for img in g}
+
+    kept, used = [], set()
     for s in result.sets:
-        counts[s.prefix] = counts.get(s.prefix, 0) + 1
-        s.number = counts[s.prefix]
-    return result
+        ids = {id(m) for m in s.members.values()}
+        touched = {group_of[i] for i in ids if i in group_of}
+        if all(g <= ids for g in touched):
+            kept.append(s)
+            used |= ids
+        else:
+            names = ", ".join(m.path.name for m in s.members.values())
+            result.warnings.append(
+                f"file names/order suggested {names}, but the images show different "
+                f"fields — regrouped by image")
+    for g in groups:
+        ids = {id(x) for x in g}
+        if ids & used:
+            continue
+        members = {x.channel: x for x in g}
+        missing = [c for c in profile.channel_names if c not in members]
+        note = IMAGE_MATCH_NOTE + (f" · no {', '.join(missing)}" if missing else "")
+        prefixes = [x.prefix for x in g]
+        kept.append(MergeSet(prefix=max(set(prefixes), key=prefixes.count), number=0,
+                             members=members, note=note))
+        used |= ids
+    result.sets = kept
+    in_sets = {id(m) for s in kept for m in s.members.values()}
+    seen = set()
+    orphans = []
+    for img in images:
+        if id(img) not in in_sets and id(img) not in seen:
+            seen.add(id(img))
+            orphans.append(img)
+    result.orphans = orphans
 
 
 def _shared_sample(keys: list[str]) -> bool:
@@ -498,9 +569,13 @@ def compute_fixed_windows(sets: list[MergeSet], profile: Profile) -> dict[str, t
     for channel in profile.channel_names:
         lows, highs = [], []
         for s in sets:
+            if channel not in s.members:
+                continue
             px = _load_array(s.members[channel].path)
             lows.append(np.percentile(px, profile.black_percentile))
             highs.append(np.percentile(px, profile.white_percentile))
+        if not lows:
+            continue
         lo, hi = min(lows), max(highs)
         windows[channel] = (lo, hi if hi > lo else lo + 1)
     return windows
@@ -648,6 +723,7 @@ class RunOptions:
     contrast: str = "fixed"             # "fixed" | "auto"
     scale_bar: bool = True
     output_format: str = "tif"          # "tif" | "png"
+    match_images: bool = True           # check / regroup sets by image content
 
 
 def default_output_dir(inputs: list[Path]) -> Path:
@@ -739,7 +815,7 @@ def run_merge(
     log(f"Scanning {len(files)} TIFF file(s) with profile '{profile.name}'...")
 
     images = [scan_file(f) for f in files]
-    result = group_sets(images, profile)
+    result = group_sets(images, profile, match_images=options.match_images)
     for w in result.warnings:
         log(f"⚠ {w}")
     if not result.sets:

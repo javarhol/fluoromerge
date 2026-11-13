@@ -52,6 +52,26 @@ Every merge records the files and the display settings it used (color and
 display range per channel) in `merge_summary.txt` (merge all) or
 `merge_log.txt` (merges you picked), so figures can be reproduced.
 
+### How it decides which images go together
+
+FluoroMerge first groups files by name and shot order, then **checks that
+against what the images show**. Different stains of one field look nothing
+alike, but they share the tissue's shape — outlines, gaps, folds, debris —
+at exactly the same pixel positions, because every channel comes from the
+same camera. FluoroMerge compares each image with the next few captures in
+its folder (a measure called mutual information, on a small copy with uneven
+lighting removed) and:
+
+- keeps a name-based set when the images agree with it (or can't tell);
+- **regroups by image** when the images clearly show different fields — e.g.
+  a lone DAPI shot shifted the file order — and says so in the log;
+- shows fields with only some channels (say DAPI + FITC, no TRITC) as their
+  own set, marked *no TRITC*.
+
+In the grid, sets found this way are marked *matched by image*. It never
+groups images of different magnifications. To turn it off on the command
+line, use `--no-image-match`.
+
 ### How it decides which file is which channel
 
 Each TIFF's embedded OME metadata records the emission wavelength it was
