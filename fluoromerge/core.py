@@ -154,20 +154,46 @@ class SourceImage:
     mtime: float = 0.0               # file modification time (≈ capture time)
     name_base: str | None = None     # stem minus a trailing word, e.g. "..._s1-2"
     name_word: str | None = None     # that trailing word, e.g. "tritc"
+    objective: str | None = None     # e.g. "10x", from metadata or filename
 
 
-def read_ome_fields(path: Path) -> tuple[float | None, float | None]:
-    """Return (emission_nm, pixel_size_um) from OME-XML in tag 270, if present."""
+def read_description(path: Path) -> str:
+    """TIFF ImageDescription (tag 270) as text; "" when absent or unreadable."""
     try:
         with Image.open(path) as im:
             desc = im.tag_v2.get(IMAGEDESCRIPTION_TAG, "") if hasattr(im, "tag_v2") else ""
     except Exception:
-        return None, None
+        return ""
     if not isinstance(desc, str):
         try:
             desc = desc.decode("utf-8", "ignore")
         except Exception:
-            return None, None
+            return ""
+    return desc
+
+
+_OBJECTIVE_RE = re.compile(r"(?<![A-Za-z0-9.])(\d{1,3})\s?[xX](?![A-Za-z])")
+
+
+def detect_objective(path: Path, desc: str | None = None) -> str | None:
+    """Objective magnification, e.g. "10x": OME NominalMagnification first,
+    then a "10x"/"40X" token in the file or folder name."""
+    desc = read_description(path) if desc is None else desc
+    m = re.search(r'NominalMagnification="([\d.]+)"', desc)
+    if m:
+        return f"{float(m.group(1)):g}x"
+    for text in (path.stem, path.parent.name):
+        m = _OBJECTIVE_RE.search(text)
+        if m:
+            return f"{int(m.group(1))}x"
+    return None
+
+
+def read_ome_fields(path: Path, desc: str | None = None) -> tuple[float | None, float | None]:
+    """Return (emission_nm, pixel_size_um) from OME-XML in tag 270, if present."""
+    desc = read_description(path) if desc is None else desc
+    if not desc:
+        return None, None
 
     def unit_of(attr: str) -> str:
         m = re.search(attr + r'="([^"]+)"', desc)
@@ -225,14 +251,16 @@ def scan_file(path: Path) -> SourceImage:
     # A trailing non-numeric word may name the channel ("..._s1-2_tritc");
     # whether it does is decided against the profile during classification.
     wm = re.match(r"(.+?)[_-]+([A-Za-z][A-Za-z0-9]*)$", path.stem)
-    em, px = read_ome_fields(path)
+    desc = read_description(path)
+    em, px = read_ome_fields(path, desc)
     with Image.open(path) as im:
         is_color = im.mode not in ("I;16", "I;16B", "I;16L", "I", "L", "F", "1")
     img = SourceImage(path=path, prefix=prefix, index=index,
                       emission_nm=em, pixel_size_um=px, is_color=is_color,
                       mtime=path.stat().st_mtime,
                       name_base=wm.group(1) if wm else None,
-                      name_word=wm.group(2) if wm else None)
+                      name_word=wm.group(2) if wm else None,
+                      objective=detect_objective(path, desc))
     if is_color and em is None and img.name_word is None:
         img.hue, img.hue_concentration = color_capture_hue(path)
     return img
@@ -483,6 +511,58 @@ def _scaled(px: np.ndarray, window: tuple[float, float]) -> np.ndarray:
     return np.clip((px - lo) / (hi - lo), 0.0, 1.0)
 
 
+# Display colors (lookup tables) offered for a channel.
+LUTS: dict[str, tuple[int, int, int]] = {
+    "Red": (255, 0, 0), "Green": (0, 255, 0), "Blue": (0, 0, 255),
+    "Cyan": (0, 255, 255), "Magenta": (255, 0, 255), "Yellow": (255, 255, 0),
+    "Gray": (255, 255, 255),
+}
+
+
+def lut_name(color: tuple[int, int, int]) -> str:
+    for name, c in LUTS.items():
+        if tuple(color) == c:
+            return name
+    return "rgb({}, {}, {})".format(*color)
+
+
+@dataclass
+class Adjustment:
+    """How one channel image is displayed in a composite: raw intensity
+    `black` maps to dark, `white` to full `color`."""
+    color: tuple[int, int, int]
+    black: float
+    white: float
+
+    def describe(self) -> str:
+        return f"{lut_name(self.color)} {self.black:.0f}-{self.white:.0f}"
+
+
+def image_stats(px: np.ndarray, profile: Profile) -> tuple[float, float]:
+    """Auto-contrast window (black, white) from the profile's percentiles."""
+    lo = float(np.percentile(px, profile.black_percentile))
+    hi = float(np.percentile(px, profile.white_percentile))
+    return lo, (hi if hi > lo else lo + 1)
+
+
+def colorize(px: np.ndarray, adj: Adjustment) -> np.ndarray:
+    """One channel as a float RGB layer (0..1)."""
+    scaled = _scaled(px, (adj.black, max(adj.white, adj.black + 1e-6)))
+    color = np.asarray(adj.color, dtype=np.float32) / 255.0
+    return scaled[:, :, None].astype(np.float32) * color[None, None, :]
+
+
+def composite(layers: list[tuple[np.ndarray, Adjustment]]) -> Image.Image:
+    """Additive color merge of any number of adjusted channel images
+    (all the same shape)."""
+    rgb: np.ndarray | None = None
+    for px, adj in layers:
+        layer = colorize(px, adj)
+        rgb = layer if rgb is None else rgb + layer
+    out = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return Image.fromarray(out)
+
+
 def render_set(
     s: MergeSet,
     profile: Profile,
@@ -583,6 +663,67 @@ def default_output_dir(inputs: list[Path]) -> Path:
         fallback = Path.home() / "Desktop" / f"{base.name}_composites"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
+
+
+def unique_path(out_dir: Path, stem: str, ext: str) -> Path:
+    path = out_dir / f"{stem}.{ext}"
+    n = 2
+    while path.exists():
+        path = out_dir / f"{stem}_{n}.{ext}"
+        n += 1
+    return path
+
+
+def manual_stem(paths: list[Path]) -> str:
+    """Output name for a hand-picked set: the files' shared name prefix."""
+    stems = [p.stem for p in paths]
+    common = os.path.commonprefix(stems)
+    if common not in stems:
+        # don't end mid-token ("sample_a_0" from "sample_a_01" + "sample_a_05")
+        common = re.sub(r"[^_\-\s.]*$", "", common)
+    common = common.rstrip("_- .")
+    return (common or stems[0]) + "_merge"
+
+
+def save_composite(
+    members: list[tuple[SourceImage, Adjustment]],
+    out_path: Path,
+    scale_bar: bool,
+    fallback_pixel_size_um: float | None,
+) -> tuple[Path, bool]:
+    """Render full-resolution channel images with their adjustments and save.
+    Returns (path, scale_bar_drawn)."""
+    arrays = [(_load_array(img.path), adj) for img, adj in members]
+    shapes = {a.shape for a, _ in arrays}
+    if len(shapes) > 1:
+        names = ", ".join(f"{img.path.name} {a.shape[1]}x{a.shape[0]}"
+                          for (img, _), (a, _) in zip(members, arrays))
+        raise ValueError(f"images are different sizes and can't be overlaid: {names}")
+    image = composite(arrays)
+    um_per_px = next((img.pixel_size_um for img, _ in members if img.pixel_size_um),
+                     fallback_pixel_size_um)
+    drew = False
+    if scale_bar and um_per_px:
+        draw_scale_bar(image, um_per_px)
+        drew = True
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(out_path)
+    return out_path, drew
+
+
+def describe_members(members: list[tuple[SourceImage, Adjustment]]) -> str:
+    return "  ".join(
+        f"{img.channel or '?'}:{img.path.name} [{adj.describe()}]" for img, adj in members
+    )
+
+
+def append_merge_log(out_dir: Path, line: str) -> None:
+    """Record of every merge saved from the review grid, with the display
+    settings used, so figures can be reproduced."""
+    from datetime import datetime
+
+    with open(out_dir / "merge_log.txt", "a", encoding="utf-8") as fh:
+        fh.write(f"{datetime.now():%Y-%m-%d %H:%M}  {line}\n")
 
 
 def run_merge(

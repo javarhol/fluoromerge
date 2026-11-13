@@ -11,12 +11,46 @@ just need to be combined — no ImageJ knowledge required.
    **Releases** page and unzip it.
 2. Open **FluoroMerge**.
 3. Pick your microscope profile from the dropdown.
-4. Drag your image folder onto the window (or use *Choose folder…*).
-5. Done — composites appear in a `composites` folder next to your images,
-   along with a `merge_summary.txt` listing exactly which files were merged
-   and anything that was skipped.
+4. Drag your images or image folder onto the window (or use *Choose folder…*).
+5. The images open in a **review grid**. Each tile shows the channel
+   (DAPI, FITC, …) and objective, and the sets FluoroMerge detected are grouped
+   together in boxes. Then either:
+   - click **Merge all detected sets**, or
+   - click the images that belong together (any 2 or more, even from
+     different boxes) and press **Merge selected**.
+6. Composites appear in a `composites` folder next to your images.
 
-You can also drop just the 3 channel images of a single field of view.
+Tick *Merge automatically without reviewing* on the start screen to skip the
+grid and merge every detected set straight away, as earlier versions did.
+
+### Adjusting an image before merging
+
+Press **Space** on an image (or double-click it) to open it full size. There
+you can pick its color (LUT) and set its **display range** on the histogram:
+pixels at or below the black handle show as black, pixels at or above the
+white handle show as full color. Drag the white handle left to brighten, the
+black handle right to darken the background, or the space between them to
+shift both. *Auto* stretches the image on its own, *Reset* goes back to the
+starting range, and *Use for all DAPI* copies the color and range to every
+image of that channel. Press Space again to go back to the grid.
+
+The "% maxed out" readout turns orange when more than 1% of pixels are at
+full brightness — detail there is lost. Tick *Highlight pixels at full
+brightness* (H) to see them in orange on the image.
+
+**Preview & adjust merge** (P) shows the selected images overlaid, with a
+histogram for each layer, before you save. Untick a layer to leave it out.
+
+Adjustments are linear and change only how the image is displayed and saved
+as a composite, never the original files.
+
+Keys in the grid: arrows move, Enter selects, Space opens, P previews,
+M merges, ⌘/Ctrl-A selects all, Esc clears the selection. In the viewer,
+← / → step through images, S selects and H toggles the full-brightness highlight.
+
+Every merge records the files and the display settings it used (color and
+display range per channel) in `merge_summary.txt` (merge all) or
+`merge_log.txt` (merges you picked), so figures can be reproduced.
 
 ### How it decides which file is which channel
 
