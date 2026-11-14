@@ -1,7 +1,9 @@
 """Generate synthetic OME-TIFF fixtures that replicate the structures seen in
 real microscope exports: complete triplets, an out-of-order set, a duplicated
 channel (abandoned first shot), a trailing orphan, files with no metadata,
-color-camera captures, and files named by channel word ("..._s1-2_tritc").
+color-camera captures, files named by channel word ("..._s1-2_tritc"), and a
+messy tissue-section session whose shot order defeats file-order grouping
+(messy_tissue/, for testing grouping by image content).
 
 Usage: python tests/make_fixtures.py [output_dir]
 """
@@ -133,7 +135,90 @@ def main() -> None:
         save(path, em, seed, with_meta=False)
         os.utime(path, (t0 + dt, t0 + dt))
 
+    make_messy_tissue(out / "messy_tissue")
+
     print(f"fixtures written to {out}")
+
+
+# --------------------------------------------------------------------------- #
+# Messy tissue-section folder (modeled on real 40x/10x gut sections)
+# --------------------------------------------------------------------------- #
+
+def _smooth(a: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian blur via FFT (wraps at the edges, fine for texture)."""
+    fy = np.fft.fftfreq(a.shape[0])[:, None]
+    fx = np.fft.fftfreq(a.shape[1])[None, :]
+    k = np.exp(-2 * (np.pi * sigma) ** 2 * (fx ** 2 + fy ** 2))
+    return np.real(np.fft.ifft2(np.fft.fft2(a) * k))
+
+
+def tissue_field(seed: int) -> dict[int, np.ndarray]:
+    """Three channels of one tissue field. Like real sections they look
+    different per stain — nuclei / cytoplasm excluding nuclei / edges +
+    puncta — but share the tissue outline, gaps and lumens."""
+    rng = np.random.default_rng(1000 + seed)
+    yy, xx = np.mgrid[0:H, 0:W]
+    shape = _smooth(rng.normal(size=(H, W)), 40)
+    shape = (shape - shape.mean()) / shape.std()
+    tissue = 1 / (1 + np.exp(-(shape + 0.3) * 6))           # tissue with gaps
+    for _ in range(4):                                        # crypt lumens
+        cx, cy = rng.uniform(0, W), rng.uniform(0, H)
+        rx, ry = rng.uniform(25, 60), rng.uniform(20, 50)
+        tissue *= 1 - np.exp(-(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) ** 2)
+    nuclei = np.zeros((H, W))
+    for _ in range(260):
+        cx, cy = rng.uniform(0, W), rng.uniform(0, H)
+        nuclei += np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * rng.uniform(3, 5) ** 2))
+    nuclei = np.clip(nuclei, 0, 1) * tissue
+    texture = 0.6 + 0.4 * _smooth(rng.normal(size=(H, W)), 6) / 0.05
+    edges = np.hypot(*np.gradient(_smooth(tissue, 2)))
+    puncta = (rng.random((H, W)) > 0.9993).astype(float)
+    puncta = _smooth(puncta, 1.5) * 400
+    noise = lambda: rng.normal(110, 20, (H, W))              # noqa: E731
+    channels = {
+        455: 2800 * nuclei + 250 * tissue + noise(),
+        518: 900 * tissue * np.clip(texture, 0.2, 2) * (1 - 0.85 * nuclei) + noise(),
+        615: 9000 * edges + 300 * tissue + 900 * puncta + noise(),
+    }
+    return {em: np.clip(a, 0, 65535).astype(np.uint16) for em, a in channels.items()}
+
+
+TISSUE_OME = OME_TEMPLATE.replace(
+    '<Image ID="Image:0">',
+    '<Instrument ID="Instrument:0"><Objective ID="Objective:0" '
+    'NominalMagnification="{mag}"/></Instrument><Image ID="Image:0">',
+).replace('PhysicalSizeX="0.645"', 'PhysicalSizeX="{px}"').replace(
+    'PhysicalSizeY="0.645"', 'PhysicalSizeY="{px}"')
+
+
+def make_messy_tissue(folder: Path) -> None:
+    """Shot order that defeats file-order grouping, like real sessions:
+
+        01 DAPI  field A   (lone shot, no partners)
+        02-04    field B   TRITC, FITC, DAPI
+        05-07    field C   TRITC, FITC, DAPI
+        08-09    field D   DAPI, FITC only (no TRITC)
+        10 FITC  field E   (stray shot)
+        11-13    field F   FITC, TRITC, DAPI at 10x (different pixel size)
+
+    Expected sets: {02,03,04} {05,06,07} {08,09} {11,12,13}; 01 and 10 alone.
+    Grouping by file order alone gets B, C and D wrong."""
+    folder.mkdir(parents=True, exist_ok=True)
+    plan = [("A", 455), ("B", 615), ("B", 518), ("B", 455), ("C", 615), ("C", 518),
+            ("C", 455), ("D", 455), ("D", 518), ("E", 518), ("F", 518), ("F", 615),
+            ("F", 455)]
+    fields = {}
+    t0 = 1_790_000_000
+    for n, (name, em) in enumerate(plan, start=1):
+        if name not in fields:
+            fields[name] = tissue_field(ord(name))
+        mag, px = (10, 0.645) if name == "F" else (40, 0.16125)
+        path = folder / f"M1_sl05__{n:02d}.tif"
+        ifd = ImageFileDirectory_v2()
+        ifd[270] = TISSUE_OME.format(w=W, h=H, em=em, mag=mag, px=px)
+        Image.fromarray(fields[name][em]).save(path, tiffinfo=ifd)
+        t = t0 + n * 90
+        os.utime(path, (t, t))
 
 
 if __name__ == "__main__":

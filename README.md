@@ -20,6 +20,9 @@ just need to be combined — no ImageJ knowledge required.
      different boxes) and press **Merge selected**.
 6. Composites appear in a `composites` folder next to your images.
 
+![Review grid: detected sets grouped in boxes, each tile labeled with its
+channel and objective](docs/images/review-grid.webp)
+
 Tick *Merge automatically without reviewing* on the start screen to skip the
 grid and merge every detected set straight away, as earlier versions did.
 
@@ -40,6 +43,9 @@ brightness* (H) to see them in orange on the image.
 
 **Preview & adjust merge** (P) shows the selected images overlaid, with a
 histogram for each layer, before you save. Untick a layer to leave it out.
+
+![Merge preview: the overlay on the left, a color picker and histogram with
+black / white point handles for each channel on the right](docs/images/merge-preview.webp)
 
 Adjustments are linear and change only how the image is displayed and saved
 as a composite, never the original files.
