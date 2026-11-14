@@ -1262,12 +1262,17 @@ class App:
         self._open_viewer(items, merge_mode=True)
 
     def _open_viewer(self, items: list[Item], merge_mode: bool) -> None:
-        if self.viewer is not None:
-            self.viewer.destroy()
-        else:
-            self.grid_frame.pack_forget()
+        # The viewer is laid over the grid rather than swapped with it: on
+        # macOS, unmapping the grid and mapping it back makes Tk redraw every
+        # tile from scratch, which showed as a blank window for a moment
+        # after Space / Esc. The new viewer goes on top before the old one is
+        # removed, so stepping with the arrow keys doesn't flash the grid.
+        old = self.viewer
         self.viewer = Viewer(self.body, self, items, merge_mode)
-        self.viewer.pack(fill="both", expand=True)
+        self.viewer.place(x=0, y=0, relwidth=1, relheight=1)
+        self.viewer.lift()
+        if old is not None:
+            old.destroy()
         self.take_focus()
 
     def close_viewer(self) -> None:
@@ -1275,7 +1280,6 @@ class App:
             return
         self.viewer.destroy()
         self.viewer = None
-        self.grid_frame.pack(fill="both", expand=True)
         self.take_focus()
         self.refresh_tiles(self.thumbs_dirty)
         self.thumbs_dirty.clear()
